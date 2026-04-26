@@ -6,14 +6,9 @@
     <title>Body & Fingertip Ball Physics</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-            overflow: hidden;
-            background: #000;
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-        }
+        body { overflow: hidden; background: #000; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
         #mainCanvas { display: block; width: 100vw; height: 100vh; }
         video, #segCanvas { display: none; }
-
         #loading {
             position: fixed; inset: 0;
             background: rgba(0,0,0,0.92);
@@ -24,38 +19,27 @@
         .spinner {
             width: 56px; height: 56px;
             border: 4px solid rgba(0,255,255,0.15);
-            border-top-color: #0ff;
-            border-radius: 50%;
-            animation: spin 0.75s linear infinite;
-            margin-bottom: 22px;
+            border-top-color: #0ff; border-radius: 50%;
+            animation: spin 0.75s linear infinite; margin-bottom: 22px;
         }
         @keyframes spin { to { transform: rotate(360deg); } }
         .load-title { font-size: 26px; font-weight: 700; color: #0ff; letter-spacing: 3px; }
         .load-desc { margin-top: 10px; font-size: 13px; color: #999; text-align: center; line-height: 1.7; }
-
         #hud {
             position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
             background: rgba(0,0,0,0.65); color: #eee;
             padding: 10px 24px; border-radius: 28px; font-size: 13px;
-            pointer-events: none;
-            border: 1px solid rgba(0,255,255,0.45);
-            box-shadow: 0 0 14px rgba(0,255,255,0.2);
-            z-index: 5; white-space: nowrap;
+            pointer-events: none; border: 1px solid rgba(0,255,255,0.45);
+            box-shadow: 0 0 14px rgba(0,255,255,0.2); z-index: 5; white-space: nowrap;
         }
         #debug {
             position: fixed; top: 8px; left: 10px;
-            color: #0f0; font: 11px/1.4 monospace;
-            z-index: 5; pointer-events: none;
+            color: #0f0; font: 11px/1.4 monospace; z-index: 5; pointer-events: none;
         }
     </style>
-
-    <!-- MediaPipe -->
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation/selfie_segmentation.js" crossorigin="anonymous"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
-
-    <!-- Physics -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/holistic/holistic.js" crossorigin="anonymous"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.19.0/matter.min.js"></script>
 </head>
 <body>
@@ -63,12 +47,8 @@
 <div id="loading">
     <div class="spinner"></div>
     <div class="load-title">AI MOTION CAPTURE</div>
-    <div class="load-desc">
-        カメラのアクセスを許可してください。<br>
-        AIモデルを読み込み中…
-    </div>
+    <div class="load-desc">カメラのアクセスを許可してください。<br>AIモデルを読み込み中…（数秒かかります）</div>
 </div>
-
 <div id="hud">親指＋人差し指でつまんでボールをつかむ ／ 体全体でボールが弾む</div>
 <div id="debug"></div>
 
@@ -81,309 +61,309 @@
     "use strict";
 
     // ================================================================
-    // DOM Elements
+    // DOM
     // ================================================================
-    const video = document.getElementById('video');
-    const canvas = document.getElementById('mainCanvas');
-    const ctx = canvas.getContext('2d');
+    const video     = document.getElementById('video');
+    const canvas    = document.getElementById('mainCanvas');
+    const ctx       = canvas.getContext('2d');
     const segCanvas = document.getElementById('segCanvas');
-    const segCtx = segCanvas.getContext('2d', { willReadFrequently: true });
+    const segCtx    = segCanvas.getContext('2d', { willReadFrequently: true });
     const loadingEl = document.getElementById('loading');
-    const debugEl = document.getElementById('debug');
+    const debugEl   = document.getElementById('debug');
 
     // ================================================================
-    // Matter.js Physics Engine
+    // Matter.js
     // ================================================================
     const { Engine, World, Bodies, Body } = Matter;
     const engine = Engine.create();
-    engine.gravity.y = 0.55;
+    engine.gravity.y = 0.6;
     const world = engine.world;
 
     // ================================================================
-    // Camera / Canvas Layout
+    // Layout
     // ================================================================
     const CAM_W = 640, CAM_H = 480;
     let drawW, drawH, offX, offY;
 
     function updateLayout() {
-        canvas.width = innerWidth;
+        canvas.width  = innerWidth;
         canvas.height = innerHeight;
-        const videoRatio = CAM_W / CAM_H;
-        const canvasRatio = canvas.width / canvas.height;
-        if (videoRatio > canvasRatio) {
-            drawH = canvas.height;
-            drawW = drawH * videoRatio;
-        } else {
-            drawW = canvas.width;
-            drawH = drawW / videoRatio;
-        }
-        offX = (canvas.width - drawW) / 2;
+        const vr = CAM_W / CAM_H;
+        const cr = canvas.width / canvas.height;
+        if (vr > cr) { drawH = canvas.height; drawW = drawH * vr; }
+        else         { drawW = canvas.width;  drawH = drawW / vr; }
+        offX = (canvas.width  - drawW) / 2;
         offY = (canvas.height - drawH) / 2;
         rebuildWalls();
     }
 
-    // Invisible walls (floor + sides)
     let wallBodies = [];
     function rebuildWalls() {
         wallBodies.forEach(w => World.remove(world, w));
         wallBodies = [];
-        const W = canvas.width, H = canvas.height, thickness = 80;
+        const W = canvas.width, H = canvas.height, t = 80;
         wallBodies.push(
-            Bodies.rectangle(W / 2, H + thickness / 2, W * 3, thickness, { isStatic: true, restitution: 0.6 }),
-            Bodies.rectangle(-thickness / 2, H / 2, thickness, H * 3, { isStatic: true, restitution: 0.6 }),
-            Bodies.rectangle(W + thickness / 2, H / 2, thickness, H * 3, { isStatic: true, restitution: 0.6 })
+            Bodies.rectangle(W / 2, H + t / 2, W * 3, t, { isStatic: true, restitution: 0.7 }),
+            Bodies.rectangle(-t / 2, H / 2, t, H * 3,   { isStatic: true, restitution: 0.7 }),
+            Bodies.rectangle(W + t / 2, H / 2, t, H * 3, { isStatic: true, restitution: 0.7 })
         );
         wallBodies.forEach(w => World.add(world, w));
     }
-
     addEventListener('resize', updateLayout);
     updateLayout();
 
-    // ================================================================
-    // Coordinate mapping (normalized → screen, mirrored)
-    // ================================================================
-    function mapCoord(nx, ny) {
-        return {
-            x: offX + (1.0 - nx) * drawW,
-            y: offY + ny * drawH
-        };
+    // Normalized coord → screen (mirrored)
+    function mp(nx, ny) {
+        return { x: offX + (1.0 - nx) * drawW, y: offY + ny * drawH };
     }
 
     // ================================================================
-    // Body Contour Collision - Static Circle Pool
+    // Body Contour: static circle pool for segmentation-based collision
     // ================================================================
-    const CONTOUR_POOL_SIZE = 800;
+    const POOL_SIZE = 1000;
     const contourPool = [];
-    for (let i = 0; i < CONTOUR_POOL_SIZE; i++) {
-        const body = Bodies.circle(-3000, -3000, 9, {
-            isStatic: true,
-            friction: 0.03,
-            restitution: 0.88
+    for (let i = 0; i < POOL_SIZE; i++) {
+        const b = Bodies.circle(-4000, -4000, 8, {
+            isStatic: true, friction: 0.02, restitution: 0.92, slop: 0.01
         });
-        contourPool.push(body);
-        World.add(world, body);
+        contourPool.push(b);
+        World.add(world, b);
     }
-    let activeContourCount = 0;
+    let activeContour = 0;
 
     // ================================================================
-    // Ball Management
+    // Balls
     // ================================================================
     let balls = [];
     const MAX_BALLS = 50;
 
     function spawnBall() {
-        // Remove oldest if over limit
         if (balls.length >= MAX_BALLS) {
             const old = balls.shift();
-            if (grabbedBall[0] === old) grabbedBall[0] = null;
-            if (grabbedBall[1] === old) grabbedBall[1] = null;
+            for (let h = 0; h < 2; h++) if (grabbed[h] === old) grabbed[h] = null;
             World.remove(world, old);
         }
-        const radius = 13 + Math.random() * 16;
-        const ball = Bodies.circle(
-            80 + Math.random() * (canvas.width - 160), -70, radius,
-            { restitution: 0.82, friction: 0.015, density: 0.003, frictionAir: 0.0008 }
+        const r = 14 + Math.random() * 14;
+        const b = Bodies.circle(
+            80 + Math.random() * (canvas.width - 160), -70, r,
+            { restitution: 0.82, friction: 0.01, density: 0.003, frictionAir: 0.001 }
         );
-        ball._radius = radius;
-        ball._color = `hsl(${Math.random() * 360 | 0}, 82%, 58%)`;
-        balls.push(ball);
-        World.add(world, ball);
+        b._r = r;
+        b._c = `hsl(${Math.random() * 360 | 0}, 82%, 58%)`;
+        balls.push(b);
+        World.add(world, b);
     }
 
     // ================================================================
-    // Hand Grab State (supports 2 hands)
+    // Hand Grab State (2 hands)
     // ================================================================
-    const grabbedBall = [null, null];
+    const grabbed     = [null, null];
     const prevGripPos = [{ x: 0, y: 0 }, { x: 0, y: 0 }];
-    const gripVelocity = [{ x: 0, y: 0 }, { x: 0, y: 0 }];
+    const gripVel     = [{ x: 0, y: 0 }, { x: 0, y: 0 }];
     const pinchSmooth = [0, 0];
-    let latestHandLandmarks = null;
+
+    // Latest landmarks for rendering
+    let latestLeftHand  = null;
+    let latestRightHand = null;
+    let latestPose      = null;
+
+    let appStarted = false;
 
     // ================================================================
-    // Model Ready Tracking
-    // ================================================================
-    let segReady = false, handsReady = false, appStarted = false;
-    function checkModelsReady() {
-        if (segReady && handsReady && !appStarted) {
-            appStarted = true;
-            loadingEl.style.display = 'none';
-        }
-    }
-
-    // ================================================================
-    // Segmentation Processing
+    // Process Segmentation Mask → Edge + Interior → Place Physics Bodies
     // ================================================================
     function processSegmentation(segMask) {
-        // Draw mask at reduced resolution for performance
-        const scale = 0.2;
-        const sw = Math.round(CAM_W * scale);
-        const sh = Math.round(CAM_H * scale);
+        if (!segMask) {
+            // No mask: clear all contour bodies
+            for (let i = 0; i < POOL_SIZE; i++)
+                Body.setPosition(contourPool[i], { x: -4000, y: -4000 });
+            activeContour = 0;
+            return;
+        }
+
+        const scale = 0.18;
+        const sw = Math.round(CAM_W * scale);  // ~115
+        const sh = Math.round(CAM_H * scale);  // ~86
         segCanvas.width = sw;
         segCanvas.height = sh;
         segCtx.drawImage(segMask, 0, 0, sw, sh);
 
-        const imageData = segCtx.getImageData(0, 0, sw, sh);
-        const pixels = imageData.data;
+        const imgData = segCtx.getImageData(0, 0, sw, sh);
+        const px = imgData.data;
 
-        // Build binary mask (threshold on R channel or alpha)
-        const binary = new Uint8Array(sw * sh);
+        // Binary mask
+        const bin = new Uint8Array(sw * sh);
         for (let i = 0; i < sw * sh; i++) {
-            binary[i] = (pixels[i * 4] > 100 || pixels[i * 4 + 3] > 100) ? 1 : 0;
+            bin[i] = (px[i * 4] > 80 || px[i * 4 + 3] > 80) ? 1 : 0;
         }
 
-        // Edge detection: find contour pixels
-        const pointsX = [], pointsY = [];
+        const ptsX = [], ptsY = [];
+
+        // Edge detection (4-neighbor)
         for (let y = 1; y < sh - 1; y++) {
             for (let x = 1; x < sw - 1; x++) {
                 const idx = y * sw + x;
-                if (!binary[idx]) continue;
-                // If any 4-neighbor is background, this is an edge pixel
-                if (!binary[idx - 1] || !binary[idx + 1] || !binary[idx - sw] || !binary[idx + sw]) {
-                    pointsX.push(x);
-                    pointsY.push(y);
+                if (!bin[idx]) continue;
+                if (!bin[idx - 1] || !bin[idx + 1] || !bin[idx - sw] || !bin[idx + sw]) {
+                    ptsX.push(x);
+                    ptsY.push(y);
                 }
             }
         }
 
-        // Interior horizontal "ribs" for solid collision coverage
-        // (prevents balls from passing through the body's interior)
-        for (let y = 0; y < sh; y += 3) {
-            let leftEdge = -1, rightEdge = -1;
+        // Interior horizontal fill ribs (prevents balls falling through body)
+        for (let y = 0; y < sh; y += 2) {
+            let left = -1, right = -1;
             for (let x = 0; x < sw; x++) {
-                if (binary[y * sw + x]) {
-                    if (leftEdge < 0) leftEdge = x;
-                    rightEdge = x;
+                if (bin[y * sw + x]) {
+                    if (left < 0) left = x;
+                    right = x;
                 }
             }
-            if (leftEdge >= 0 && rightEdge > leftEdge) {
-                const span = rightEdge - leftEdge;
-                const step = Math.max(3, Math.floor(span / 6));
-                for (let x = leftEdge; x <= rightEdge; x += step) {
-                    pointsX.push(x);
-                    pointsY.push(y);
+            if (left >= 0 && right > left) {
+                const step = Math.max(2, Math.floor((right - left) / 8));
+                for (let x = left; x <= right; x += step) {
+                    ptsX.push(x);
+                    ptsY.push(y);
                 }
             }
         }
 
-        // Map points to screen coordinates and place physics bodies
-        const totalPoints = pointsX.length;
+        // Place bodies
+        const total = ptsX.length;
         let placed = 0;
-
-        if (totalPoints <= CONTOUR_POOL_SIZE) {
-            for (let i = 0; i < totalPoints; i++) {
-                Body.setPosition(contourPool[i], mapCoord(pointsX[i] / sw, pointsY[i] / sh));
+        if (total <= POOL_SIZE) {
+            for (let i = 0; i < total; i++) {
+                Body.setPosition(contourPool[i], mp(ptsX[i] / sw, ptsY[i] / sh));
                 placed++;
             }
         } else {
-            // Uniformly sample if we have too many points
-            const sampleStep = totalPoints / CONTOUR_POOL_SIZE;
-            for (let i = 0; i < CONTOUR_POOL_SIZE; i++) {
-                const j = Math.floor(i * sampleStep);
-                Body.setPosition(contourPool[i], mapCoord(pointsX[j] / sw, pointsY[j] / sh));
+            const step = total / POOL_SIZE;
+            for (let i = 0; i < POOL_SIZE; i++) {
+                const j = Math.floor(i * step);
+                Body.setPosition(contourPool[i], mp(ptsX[j] / sw, ptsY[j] / sh));
                 placed++;
             }
         }
-
-        // Move unused bodies off-screen
-        for (let i = placed; i < CONTOUR_POOL_SIZE; i++) {
-            Body.setPosition(contourPool[i], { x: -3000, y: -3000 });
-        }
-        activeContourCount = placed;
+        for (let i = placed; i < POOL_SIZE; i++)
+            Body.setPosition(contourPool[i], { x: -4000, y: -4000 });
+        activeContour = placed;
     }
 
     // ================================================================
-    // Hands Processing (pinch grab/release)
+    // Process Hand Landmarks (pinch = thumb tip + index tip)
     // ================================================================
-    function processHands(multiHandLandmarks) {
-        latestHandLandmarks = multiHandLandmarks;
-
-        if (!multiHandLandmarks || multiHandLandmarks.length === 0) {
-            for (let h = 0; h < 2; h++) releaseGrab(h);
+    function processHand(handIndex, landmarks) {
+        if (!landmarks || landmarks.length < 21) {
+            releaseGrab(handIndex);
             return;
         }
 
-        for (let h = 0; h < Math.min(multiHandLandmarks.length, 2); h++) {
-            const lm = multiHandLandmarks[h];
+        // Landmark 4 = thumb tip, 8 = index finger tip, 12 = middle tip, 0 = wrist
+        const thumbTip  = mp(landmarks[4].x,  landmarks[4].y);
+        const indexTip  = mp(landmarks[8].x,  landmarks[8].y);
+        const middleTip = mp(landmarks[12].x, landmarks[12].y);
+        const wrist     = mp(landmarks[0].x,  landmarks[0].y);
 
-            // Key landmarks: 4=thumb tip, 8=index tip, 12=middle tip, 0=wrist
-            const thumbTip = mapCoord(lm[4].x, lm[4].y);
-            const indexTip = mapCoord(lm[8].x, lm[8].y);
-            const middleTip = mapCoord(lm[12].x, lm[12].y);
-            const wrist = mapCoord(lm[0].x, lm[0].y);
+        // Pinch distance
+        const pinchDist = Math.hypot(thumbTip.x - indexTip.x, thumbTip.y - indexTip.y);
+        const handSize  = Math.hypot(wrist.x - middleTip.x, wrist.y - middleTip.y) || 120;
+        const threshold = Math.max(30, handSize * 0.28);
 
-            // Pinch detection: distance between thumb tip and index tip
-            const pinchDist = Math.hypot(thumbTip.x - indexTip.x, thumbTip.y - indexTip.y);
-            const handSize = Math.hypot(wrist.x - middleTip.x, wrist.y - middleTip.y) || 120;
-            const threshold = Math.max(28, handSize * 0.26);
+        // Smoothed pinch state
+        pinchSmooth[handIndex] = pinchSmooth[handIndex] * 0.4 + (pinchDist < threshold ? 1 : 0) * 0.6;
+        const isPinching = pinchSmooth[handIndex] > 0.5;
 
-            // Smooth pinch state to avoid flickering
-            pinchSmooth[h] = pinchSmooth[h] * 0.45 + (pinchDist < threshold ? 1 : 0) * 0.55;
-            const isPinching = pinchSmooth[h] > 0.5;
+        // Grip position = midpoint of thumb and index tip
+        const gx = (thumbTip.x + indexTip.x) / 2;
+        const gy = (thumbTip.y + indexTip.y) / 2;
 
-            // Grip position = midpoint of thumb tip and index tip
-            const gripX = (thumbTip.x + indexTip.x) / 2;
-            const gripY = (thumbTip.y + indexTip.y) / 2;
+        // Velocity for throwing
+        const vx = gx - prevGripPos[handIndex].x;
+        const vy = gy - prevGripPos[handIndex].y;
+        gripVel[handIndex].x = gripVel[handIndex].x * 0.4 + vx * 0.6;
+        gripVel[handIndex].y = gripVel[handIndex].y * 0.4 + vy * 0.6;
+        prevGripPos[handIndex] = { x: gx, y: gy };
 
-            // Velocity tracking for throwing
-            const vx = gripX - prevGripPos[h].x;
-            const vy = gripY - prevGripPos[h].y;
-            gripVelocity[h].x = gripVelocity[h].x * 0.45 + vx * 0.55;
-            gripVelocity[h].y = gripVelocity[h].y * 0.45 + vy * 0.55;
-            prevGripPos[h] = { x: gripX, y: gripY };
-
-            if (isPinching && !grabbedBall[h]) {
-                // Search for nearest ball to grab
-                let closest = null, closestDist = Infinity;
-                for (const ball of balls) {
-                    if (grabbedBall[1 - h] === ball) continue; // other hand already has it
-                    const d = Math.hypot(ball.position.x - gripX, ball.position.y - gripY);
-                    if (d < ball._radius + 55 && d < closestDist) {
-                        closest = ball;
-                        closestDist = d;
-                    }
+        if (isPinching && !grabbed[handIndex]) {
+            // Try to grab nearest ball
+            let closest = null, closestDist = Infinity;
+            for (const ball of balls) {
+                // Don't grab what the other hand holds
+                if (grabbed[1 - handIndex] === ball) continue;
+                const d = Math.hypot(ball.position.x - gx, ball.position.y - gy);
+                if (d < ball._r + 55 && d < closestDist) {
+                    closest = ball;
+                    closestDist = d;
                 }
-                if (closest) {
-                    grabbedBall[h] = closest;
-                    Body.setVelocity(closest, { x: 0, y: 0 });
-                }
-            } else if (isPinching && grabbedBall[h]) {
-                // Move ball to grip position
-                Body.setPosition(grabbedBall[h], { x: gripX, y: gripY });
-                Body.setVelocity(grabbedBall[h], { x: 0, y: 0 });
-            } else if (!isPinching && grabbedBall[h]) {
-                // Release with velocity (throw)
-                Body.setVelocity(grabbedBall[h], {
-                    x: gripVelocity[h].x * 0.9,
-                    y: gripVelocity[h].y * 0.9
-                });
-                grabbedBall[h] = null;
             }
-        }
-
-        // Release grabs for undetected hands
-        for (let h = multiHandLandmarks.length; h < 2; h++) {
-            releaseGrab(h);
+            if (closest) {
+                grabbed[handIndex] = closest;
+                Body.setVelocity(closest, { x: 0, y: 0 });
+            }
+        } else if (isPinching && grabbed[handIndex]) {
+            // Hold: move ball to grip position
+            Body.setPosition(grabbed[handIndex], { x: gx, y: gy });
+            Body.setVelocity(grabbed[handIndex], { x: 0, y: 0 });
+        } else if (!isPinching && grabbed[handIndex]) {
+            // Release with throw velocity
+            Body.setVelocity(grabbed[handIndex], {
+                x: gripVel[handIndex].x * 0.9,
+                y: gripVel[handIndex].y * 0.9
+            });
+            grabbed[handIndex] = null;
         }
     }
 
-    function releaseGrab(handIndex) {
-        if (!grabbedBall[handIndex]) return;
-        Body.setVelocity(grabbedBall[handIndex], {
-            x: gripVelocity[handIndex].x * 0.5,
-            y: gripVelocity[handIndex].y * 0.5
+    function releaseGrab(h) {
+        if (!grabbed[h]) return;
+        Body.setVelocity(grabbed[h], {
+            x: gripVel[h].x * 0.5,
+            y: gripVel[h].y * 0.5
         });
-        grabbedBall[handIndex] = null;
+        grabbed[h] = null;
     }
 
     // ================================================================
-    // Hand skeleton connections for visualization
+    // MediaPipe Holistic → onResults
     // ================================================================
-    const HAND_CONNECTIONS = [
-        [0,1],[1,2],[2,3],[3,4],        // thumb
-        [0,5],[5,6],[6,7],[7,8],        // index
-        [0,17],[5,9],[9,10],[10,11],[11,12], // middle
-        [9,13],[13,14],[14,15],[15,16], // ring
-        [13,17],[17,18],[18,19],[19,20] // pinky
+    function onHolisticResults(results) {
+        if (!appStarted) {
+            appStarted = true;
+            loadingEl.style.display = 'none';
+        }
+
+        // 1) Segmentation mask → body contour collision
+        processSegmentation(results.segmentationMask);
+
+        // 2) Hand landmarks → fingertip grab
+        latestLeftHand  = results.leftHandLandmarks  || null;
+        latestRightHand = results.rightHandLandmarks || null;
+        latestPose      = results.poseLandmarks      || null;
+
+        // Note: Holistic uses the camera-perspective labels.
+        // "leftHand" = viewer's right on mirrored display, etc.
+        // We map index 0=left (viewer-right), 1=right (viewer-left)
+        processHand(0, latestLeftHand);
+        processHand(1, latestRightHand);
+    }
+
+    // ================================================================
+    // Hand skeleton connections
+    // ================================================================
+    const HC = [
+        [0,1],[1,2],[2,3],[3,4],
+        [0,5],[5,6],[6,7],[7,8],
+        [0,17],[5,9],[9,10],[10,11],[11,12],
+        [9,13],[13,14],[14,15],[15,16],
+        [13,17],[17,18],[18,19],[19,20]
+    ];
+
+    // Pose connections (simplified for skeleton vis)
+    const PC = [
+        [11,13],[13,15],[12,14],[14,16],  // arms
+        [11,12],[23,24],[11,23],[12,24],   // torso
+        [23,25],[25,27],[24,26],[26,28]    // legs
     ];
 
     // ================================================================
@@ -393,8 +373,192 @@
 
     function renderLoop() {
         requestAnimationFrame(renderLoop);
-
-        // Step physics
         Engine.update(engine, 16.67);
 
-        const
+        const W = canvas.width, H = canvas.height;
+        ctx.clearRect(0, 0, W, H);
+
+        // ── Camera (mirrored) ──
+        if (video.readyState >= video.HAVE_ENOUGH_DATA) {
+            ctx.save();
+            ctx.translate(W, 0);
+            ctx.scale(-1, 1);
+            ctx.drawImage(video, offX, offY, drawW, drawH);
+            ctx.restore();
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.35)';
+            ctx.fillRect(0, 0, W, H);
+        }
+
+        // ── Contour dots (subtle) ──
+        ctx.fillStyle = 'rgba(0, 255, 255, 0.07)';
+        for (let i = 0; i < activeContour; i++) {
+            const p = contourPool[i].position;
+            if (p.x < -1000) continue;
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, 3.5, 0, Math.PI * 2);
+            ctx.fill();
+        }
+
+        // ── Pose skeleton ──
+        if (latestPose) {
+            ctx.strokeStyle = 'rgba(0, 180, 255, 0.35)';
+            ctx.lineWidth = 3;
+            for (const [a, b] of PC) {
+                const la = latestPose[a], lb = latestPose[b];
+                if (!la || !lb || la.visibility < 0.5 || lb.visibility < 0.5) continue;
+                const pa = mp(la.x, la.y), pb = mp(lb.x, lb.y);
+                ctx.beginPath();
+                ctx.moveTo(pa.x, pa.y);
+                ctx.lineTo(pb.x, pb.y);
+                ctx.stroke();
+            }
+        }
+
+        // ── Hand landmarks ──
+        function drawHand(landmarks, handIdx) {
+            if (!landmarks) return;
+            // Skeleton
+            ctx.strokeStyle = 'rgba(0, 255, 200, 0.35)';
+            ctx.lineWidth = 2;
+            for (const [a, b] of HC) {
+                const pa = mp(landmarks[a].x, landmarks[a].y);
+                const pb = mp(landmarks[b].x, landmarks[b].y);
+                ctx.beginPath();
+                ctx.moveTo(pa.x, pa.y);
+                ctx.lineTo(pb.x, pb.y);
+                ctx.stroke();
+            }
+            // Fingertips
+            for (const tipIdx of [4, 8, 12, 16, 20]) {
+                const p = mp(landmarks[tipIdx].x, landmarks[tipIdx].y);
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, tipIdx <= 8 ? 7 : 4, 0, Math.PI * 2);
+                ctx.fillStyle = tipIdx <= 8 ? '#ff0' : 'rgba(255,255,255,0.4)';
+                ctx.fill();
+            }
+            // Pinch line
+            const t = mp(landmarks[4].x, landmarks[4].y);
+            const ix = mp(landmarks[8].x, landmarks[8].y);
+            const pd = Math.hypot(t.x - ix.x, t.y - ix.y);
+            ctx.beginPath();
+            ctx.moveTo(t.x, t.y);
+            ctx.lineTo(ix.x, ix.y);
+            ctx.strokeStyle = pd < 40 ? '#0f0' : 'rgba(255, 255, 0, 0.4)';
+            ctx.lineWidth = pd < 40 ? 3 : 1.5;
+            ctx.stroke();
+            // Pinch circle
+            if (pd < 40) {
+                const cx = (t.x + ix.x) / 2, cy = (t.y + ix.y) / 2;
+                ctx.beginPath();
+                ctx.arc(cx, cy, 18, 0, Math.PI * 2);
+                ctx.strokeStyle = 'rgba(0, 255, 0, 0.5)';
+                ctx.lineWidth = 2.5;
+                ctx.stroke();
+            }
+        }
+        drawHand(latestLeftHand, 0);
+        drawHand(latestRightHand, 1);
+
+        // ── Balls ──
+        for (const ball of balls) {
+            const bx = ball.position.x, by = ball.position.y, r = ball._r;
+
+            // Shadow
+            ctx.beginPath();
+            ctx.arc(bx + 2, by + 3, r, 0, Math.PI * 2);
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.22)';
+            ctx.fill();
+
+            // Body with gradient
+            const grad = ctx.createRadialGradient(bx - r * 0.3, by - r * 0.3, r * 0.08, bx, by, r);
+            grad.addColorStop(0, 'rgba(255,255,255,0.4)');
+            grad.addColorStop(0.4, ball._c);
+            grad.addColorStop(1, ball._c);
+            ctx.beginPath();
+            ctx.arc(bx, by, r, 0, Math.PI * 2);
+            ctx.fillStyle = grad;
+            ctx.fill();
+
+            // Specular
+            ctx.beginPath();
+            ctx.arc(bx - r * 0.22, by - r * 0.22, r * 0.18, 0, Math.PI * 2);
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.55)';
+            ctx.fill();
+
+            // Grabbed glow
+            if (grabbed[0] === ball || grabbed[1] === ball) {
+                ctx.save();
+                ctx.shadowColor = '#0ff';
+                ctx.shadowBlur = 22;
+                ctx.beginPath();
+                ctx.arc(bx, by, r + 7, 0, Math.PI * 2);
+                ctx.strokeStyle = 'rgba(0, 255, 255, 0.85)';
+                ctx.lineWidth = 3;
+                ctx.stroke();
+                ctx.restore();
+            }
+        }
+
+        // ── Cleanup ──
+        for (let i = balls.length - 1; i >= 0; i--) {
+            const p = balls[i].position;
+            if (p.y > H + 300 || p.x < -300 || p.x > W + 300) {
+                if (grabbed[0] === balls[i]) grabbed[0] = null;
+                if (grabbed[1] === balls[i]) grabbed[1] = null;
+                World.remove(world, balls[i]);
+                balls.splice(i, 1);
+            }
+        }
+
+        // ── FPS ──
+        frameCount++;
+        const now = performance.now();
+        if (now - lastFpsTime > 1000) {
+            fps = frameCount;
+            frameCount = 0;
+            lastFpsTime = now;
+        }
+        debugEl.textContent = `FPS ${fps} | Balls ${balls.length} | Contour ${activeContour}`;
+    }
+
+    // ================================================================
+    // MediaPipe Holistic (single model: pose + hands + segmentation)
+    // ================================================================
+    const holistic = new Holistic({
+        locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/holistic/${file}`
+    });
+    holistic.setOptions({
+        modelComplexity: 1,
+        smoothLandmarks: true,
+        enableSegmentation: true,
+        smoothSegmentation: true,
+        refineFaceLandmarks: false,
+        minDetectionConfidence: 0.5,
+        minTrackingConfidence: 0.5
+    });
+    holistic.onResults(onHolisticResults);
+
+    // ================================================================
+    // Camera
+    // ================================================================
+    const camera = new Camera(video, {
+        onFrame: async () => {
+            await holistic.send({ image: video });
+        },
+        width: CAM_W,
+        height: CAM_H
+    });
+
+    camera.start().then(() => {
+        renderLoop();
+        setInterval(() => { if (appStarted) spawnBall(); }, 1100);
+    }).catch(() => {
+        loadingEl.innerHTML =
+            "<div class='load-title' style='color:#f55'>エラー</div>" +
+            "<div class='load-desc'>カメラにアクセスできませんでした。<br>カメラの使用を許可してリロードしてください。</div>";
+    });
+
+})();
+</script>
+</body>
+</html>
