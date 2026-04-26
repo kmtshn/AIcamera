@@ -8,7 +8,7 @@
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { overflow: hidden; background: #000; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
         #mainCanvas { display: block; width: 100vw; height: 100vh; }
-        video, #segCanvas { display: none; }
+        video, #segCanvas, #maskCanvas { display: none; }
         #loading {
             position: fixed; inset: 0;
             background: rgba(0,0,0,0.92);
@@ -55,33 +55,27 @@
 <video id="video" muted playsinline autoplay></video>
 <canvas id="mainCanvas"></canvas>
 <canvas id="segCanvas"></canvas>
+<canvas id="maskCanvas"></canvas>
 
 <script>
 (function () {
     "use strict";
 
-    // ================================================================
-    // DOM
-    // ================================================================
     const video     = document.getElementById('video');
     const canvas    = document.getElementById('mainCanvas');
     const ctx       = canvas.getContext('2d');
     const segCanvas = document.getElementById('segCanvas');
     const segCtx    = segCanvas.getContext('2d', { willReadFrequently: true });
+    const maskCanvas= document.getElementById('maskCanvas');
+    const maskCtx   = maskCanvas.getContext('2d', { willReadFrequently: true });
     const loadingEl = document.getElementById('loading');
     const debugEl   = document.getElementById('debug');
 
-    // ================================================================
-    // Matter.js
-    // ================================================================
     const { Engine, World, Bodies, Body } = Matter;
     const engine = Engine.create();
     engine.gravity.y = 0.6;
     const world = engine.world;
 
-    // ================================================================
-    // Layout
-    // ================================================================
     const CAM_W = 640, CAM_H = 480;
     let drawW, drawH, offX, offY;
 
@@ -112,19 +106,39 @@
     addEventListener('resize', updateLayout);
     updateLayout();
 
-    // Normalized coord → screen (mirrored)
     function mp(nx, ny) {
         return { x: offX + (1.0 - nx) * drawW, y: offY + ny * drawH };
     }
 
     // ================================================================
-    // Body Contour: static circle pool for segmentation-based collision
+    // Full-resolution mask for per-pixel body overlap check
     // ================================================================
-    const POOL_SIZE = 1000;
+    const MASK_SCALE = 0.25;
+    let fullMaskBin = null;
+    let fmW = 0, fmH = 0;
+
+    // Check if a screen-space point is inside the body mask
+    function isInsideBody(sx, sy) {
+        if (!fullMaskBin) return false;
+        // Screen → normalized (mirrored)
+        const nx = 1.0 - (sx - offX) / drawW;
+        const ny = (sy - offY) / drawH;
+        if (nx < 0 || nx > 1 || ny < 0 || ny > 1) return false;
+        const mx = Math.floor(nx * fmW);
+        const my = Math.floor(ny * fmH);
+        if (mx < 0 || mx >= fmW || my < 0 || my >= fmH) return false;
+        return fullMaskBin[my * fmW + mx] === 1;
+    }
+
+    // ================================================================
+    // Contour body pool - LARGER radius + MORE bodies
+    // ================================================================
+    const POOL_SIZE = 1500;
+    const BODY_RADIUS = 12;
     const contourPool = [];
     for (let i = 0; i < POOL_SIZE; i++) {
-        const b = Bodies.circle(-4000, -4000, 8, {
-            isStatic: true, friction: 0.02, restitution: 0.92, slop: 0.01
+        const b = Bodies.circle(-5000, -5000, BODY_RADIUS, {
+            isStatic: true, friction: 0.01, restitution: 0.92, slop: 0.01
         });
         contourPool.push(b);
         World.add(world, b);
@@ -144,10 +158,16 @@
             World.remove(world, old);
         }
         const r = 14 + Math.random() * 14;
-        const b = Bodies.circle(
-            80 + Math.random() * (canvas.width - 160), -70, r,
-            { restitution: 0.82, friction: 0.01, density: 0.003, frictionAir: 0.001 }
-        );
+        // Spawn at a position NOT inside the body
+        let sx = 80 + Math.random() * (canvas.width - 160);
+        let tries = 0;
+        while (isInsideBody(sx, -30) && tries < 10) {
+            sx = 80 + Math.random() * (canvas.width - 160);
+            tries++;
+        }
+        const b = Bodies.circle(sx, -70, r, {
+            restitution: 0.82, friction: 0.01, density: 0.003, frictionAir: 0.001
+        });
         b._r = r;
         b._c = `hsl(${Math.random() * 360 | 0}, 82%, 58%)`;
         balls.push(b);
@@ -155,76 +175,96 @@
     }
 
     // ================================================================
-    // Hand Grab State (2 hands)
+    // Hand grab
     // ================================================================
     const grabbed     = [null, null];
     const prevGripPos = [{ x: 0, y: 0 }, { x: 0, y: 0 }];
     const gripVel     = [{ x: 0, y: 0 }, { x: 0, y: 0 }];
     const pinchSmooth = [0, 0];
 
-    // Latest landmarks for rendering
     let latestLeftHand  = null;
     let latestRightHand = null;
     let latestPose      = null;
-
     let appStarted = false;
 
     // ================================================================
-    // Process Segmentation Mask → Edge + Interior → Place Physics Bodies
+    // Segmentation → Dense contour + interior fill
     // ================================================================
     function processSegmentation(segMask) {
         if (!segMask) {
-            // No mask: clear all contour bodies
             for (let i = 0; i < POOL_SIZE; i++)
-                Body.setPosition(contourPool[i], { x: -4000, y: -4000 });
+                Body.setPosition(contourPool[i], { x: -5000, y: -5000 });
             activeContour = 0;
+            fullMaskBin = null;
             return;
         }
 
-        const scale = 0.18;
-        const sw = Math.round(CAM_W * scale);  // ~115
-        const sh = Math.round(CAM_H * scale);  // ~86
+        // --- Full-res mask for overlap checking ---
+        fmW = Math.round(CAM_W * MASK_SCALE);
+        fmH = Math.round(CAM_H * MASK_SCALE);
+        maskCanvas.width = fmW;
+        maskCanvas.height = fmH;
+        maskCtx.drawImage(segMask, 0, 0, fmW, fmH);
+        const fmData = maskCtx.getImageData(0, 0, fmW, fmH).data;
+        fullMaskBin = new Uint8Array(fmW * fmH);
+        for (let i = 0; i < fmW * fmH; i++) {
+            fullMaskBin[i] = (fmData[i * 4] > 60 || fmData[i * 4 + 3] > 60) ? 1 : 0;
+        }
+
+        // --- Lower-res for contour physics ---
+        const scale = 0.15;
+        const sw = Math.round(CAM_W * scale);
+        const sh = Math.round(CAM_H * scale);
         segCanvas.width = sw;
         segCanvas.height = sh;
         segCtx.drawImage(segMask, 0, 0, sw, sh);
-
         const imgData = segCtx.getImageData(0, 0, sw, sh);
         const px = imgData.data;
 
-        // Binary mask
         const bin = new Uint8Array(sw * sh);
         for (let i = 0; i < sw * sh; i++) {
-            bin[i] = (px[i * 4] > 80 || px[i * 4 + 3] > 80) ? 1 : 0;
+            bin[i] = (px[i * 4] > 60 || px[i * 4 + 3] > 60) ? 1 : 0;
         }
 
-        const ptsX = [], ptsY = [];
-
-        // Edge detection (4-neighbor)
+        // Dilate the mask by 1 pixel to expand collision boundary outward
+        const dilated = new Uint8Array(sw * sh);
         for (let y = 1; y < sh - 1; y++) {
             for (let x = 1; x < sw - 1; x++) {
                 const idx = y * sw + x;
-                if (!bin[idx]) continue;
-                if (!bin[idx - 1] || !bin[idx + 1] || !bin[idx - sw] || !bin[idx + sw]) {
-                    ptsX.push(x);
-                    ptsY.push(y);
+                if (bin[idx] || bin[idx-1] || bin[idx+1] || bin[idx-sw] || bin[idx+sw]
+                    || bin[idx-sw-1] || bin[idx-sw+1] || bin[idx+sw-1] || bin[idx+sw+1]) {
+                    dilated[idx] = 1;
                 }
             }
         }
 
-        // Interior horizontal fill ribs (prevents balls falling through body)
-        for (let y = 0; y < sh; y += 2) {
+        const ptsX = [], ptsY = [];
+
+        // Edge detection on dilated mask
+        for (let y = 1; y < sh - 1; y++) {
+            for (let x = 1; x < sw - 1; x++) {
+                const idx = y * sw + x;
+                if (!dilated[idx]) continue;
+                if (!dilated[idx-1] || !dilated[idx+1] || !dilated[idx-sw] || !dilated[idx+sw]) {
+                    ptsX.push(x); ptsY.push(y);
+                }
+            }
+        }
+
+        // Dense interior fill - every row, tight spacing
+        for (let y = 0; y < sh; y += 1) {
             let left = -1, right = -1;
             for (let x = 0; x < sw; x++) {
-                if (bin[y * sw + x]) {
+                if (dilated[y * sw + x]) {
                     if (left < 0) left = x;
                     right = x;
                 }
             }
             if (left >= 0 && right > left) {
-                const step = Math.max(2, Math.floor((right - left) / 8));
+                const span = right - left;
+                const step = Math.max(1, Math.floor(span / 12));
                 for (let x = left; x <= right; x += step) {
-                    ptsX.push(x);
-                    ptsY.push(y);
+                    ptsX.push(x); ptsY.push(y);
                 }
             }
         }
@@ -246,12 +286,65 @@
             }
         }
         for (let i = placed; i < POOL_SIZE; i++)
-            Body.setPosition(contourPool[i], { x: -4000, y: -4000 });
+            Body.setPosition(contourPool[i], { x: -5000, y: -5000 });
         activeContour = placed;
     }
 
     // ================================================================
-    // Process Hand Landmarks (pinch = thumb tip + index tip)
+    // Force-push balls out of body (every frame)
+    // ================================================================
+    function pushBallsOutOfBody() {
+        if (!fullMaskBin) return;
+        for (const ball of balls) {
+            // Skip grabbed balls
+            if (grabbed[0] === ball || grabbed[1] === ball) continue;
+
+            const bx = ball.position.x, by = ball.position.y;
+            if (!isInsideBody(bx, by)) continue;
+
+            // Ball is overlapping the body → find nearest escape direction
+            // Sample 8 directions to find which way is closest to "outside"
+            const r = ball._r;
+            const step = r * 0.8;
+            let bestDx = 0, bestDy = -1, bestDist = Infinity;
+
+            const dirs = [
+                [0, -1], [0, 1], [-1, 0], [1, 0],
+                [-0.707, -0.707], [0.707, -0.707], [-0.707, 0.707], [0.707, 0.707]
+            ];
+
+            for (const [dx, dy] of dirs) {
+                for (let dist = step; dist < 200; dist += step) {
+                    const tx = bx + dx * dist;
+                    const ty = by + dy * dist;
+                    if (!isInsideBody(tx, ty)) {
+                        if (dist < bestDist) {
+                            bestDist = dist;
+                            bestDx = dx;
+                            bestDy = dy;
+                        }
+                        break;
+                    }
+                }
+            }
+
+            // Apply strong repulsion force
+            const pushStrength = 0.08;
+            Body.setVelocity(ball, {
+                x: ball.velocity.x + bestDx * pushStrength * Math.min(bestDist, 50),
+                y: ball.velocity.y + bestDy * pushStrength * Math.min(bestDist, 50)
+            });
+
+            // Also directly nudge position outward
+            Body.setPosition(ball, {
+                x: bx + bestDx * 3,
+                y: by + bestDy * 3
+            });
+        }
+    }
+
+    // ================================================================
+    // Hands
     // ================================================================
     function processHand(handIndex, landmarks) {
         if (!landmarks || landmarks.length < 21) {
@@ -259,26 +352,21 @@
             return;
         }
 
-        // Landmark 4 = thumb tip, 8 = index finger tip, 12 = middle tip, 0 = wrist
         const thumbTip  = mp(landmarks[4].x,  landmarks[4].y);
         const indexTip  = mp(landmarks[8].x,  landmarks[8].y);
         const middleTip = mp(landmarks[12].x, landmarks[12].y);
         const wrist     = mp(landmarks[0].x,  landmarks[0].y);
 
-        // Pinch distance
         const pinchDist = Math.hypot(thumbTip.x - indexTip.x, thumbTip.y - indexTip.y);
         const handSize  = Math.hypot(wrist.x - middleTip.x, wrist.y - middleTip.y) || 120;
         const threshold = Math.max(30, handSize * 0.28);
 
-        // Smoothed pinch state
         pinchSmooth[handIndex] = pinchSmooth[handIndex] * 0.4 + (pinchDist < threshold ? 1 : 0) * 0.6;
         const isPinching = pinchSmooth[handIndex] > 0.5;
 
-        // Grip position = midpoint of thumb and index tip
         const gx = (thumbTip.x + indexTip.x) / 2;
         const gy = (thumbTip.y + indexTip.y) / 2;
 
-        // Velocity for throwing
         const vx = gx - prevGripPos[handIndex].x;
         const vy = gy - prevGripPos[handIndex].y;
         gripVel[handIndex].x = gripVel[handIndex].x * 0.4 + vx * 0.6;
@@ -286,10 +374,8 @@
         prevGripPos[handIndex] = { x: gx, y: gy };
 
         if (isPinching && !grabbed[handIndex]) {
-            // Try to grab nearest ball
             let closest = null, closestDist = Infinity;
             for (const ball of balls) {
-                // Don't grab what the other hand holds
                 if (grabbed[1 - handIndex] === ball) continue;
                 const d = Math.hypot(ball.position.x - gx, ball.position.y - gy);
                 if (d < ball._r + 55 && d < closestDist) {
@@ -302,11 +388,9 @@
                 Body.setVelocity(closest, { x: 0, y: 0 });
             }
         } else if (isPinching && grabbed[handIndex]) {
-            // Hold: move ball to grip position
             Body.setPosition(grabbed[handIndex], { x: gx, y: gy });
             Body.setVelocity(grabbed[handIndex], { x: 0, y: 0 });
         } else if (!isPinching && grabbed[handIndex]) {
-            // Release with throw velocity
             Body.setVelocity(grabbed[handIndex], {
                 x: gripVel[handIndex].x * 0.9,
                 y: gripVel[handIndex].y * 0.9
@@ -317,39 +401,25 @@
 
     function releaseGrab(h) {
         if (!grabbed[h]) return;
-        Body.setVelocity(grabbed[h], {
-            x: gripVel[h].x * 0.5,
-            y: gripVel[h].y * 0.5
-        });
+        Body.setVelocity(grabbed[h], { x: gripVel[h].x * 0.5, y: gripVel[h].y * 0.5 });
         grabbed[h] = null;
     }
 
     // ================================================================
-    // MediaPipe Holistic → onResults
+    // Holistic results
     // ================================================================
     function onHolisticResults(results) {
-        if (!appStarted) {
-            appStarted = true;
-            loadingEl.style.display = 'none';
-        }
-
-        // 1) Segmentation mask → body contour collision
+        if (!appStarted) { appStarted = true; loadingEl.style.display = 'none'; }
         processSegmentation(results.segmentationMask);
-
-        // 2) Hand landmarks → fingertip grab
         latestLeftHand  = results.leftHandLandmarks  || null;
         latestRightHand = results.rightHandLandmarks || null;
         latestPose      = results.poseLandmarks      || null;
-
-        // Note: Holistic uses the camera-perspective labels.
-        // "leftHand" = viewer's right on mirrored display, etc.
-        // We map index 0=left (viewer-right), 1=right (viewer-left)
         processHand(0, latestLeftHand);
         processHand(1, latestRightHand);
     }
 
     // ================================================================
-    // Hand skeleton connections
+    // Drawing helpers
     // ================================================================
     const HC = [
         [0,1],[1,2],[2,3],[3,4],
@@ -358,16 +428,14 @@
         [9,13],[13,14],[14,15],[15,16],
         [13,17],[17,18],[18,19],[19,20]
     ];
-
-    // Pose connections (simplified for skeleton vis)
     const PC = [
-        [11,13],[13,15],[12,14],[14,16],  // arms
-        [11,12],[23,24],[11,23],[12,24],   // torso
-        [23,25],[25,27],[24,26],[26,28]    // legs
+        [11,13],[13,15],[12,14],[14,16],
+        [11,12],[23,24],[11,23],[12,24],
+        [23,25],[25,27],[24,26],[26,28]
     ];
 
     // ================================================================
-    // Render Loop
+    // Render
     // ================================================================
     let fps = 0, frameCount = 0, lastFpsTime = performance.now();
 
@@ -375,10 +443,13 @@
         requestAnimationFrame(renderLoop);
         Engine.update(engine, 16.67);
 
+        // Push overlapping balls out every frame
+        pushBallsOutOfBody();
+
         const W = canvas.width, H = canvas.height;
         ctx.clearRect(0, 0, W, H);
 
-        // ── Camera (mirrored) ──
+        // Camera (mirrored)
         if (video.readyState >= video.HAVE_ENOUGH_DATA) {
             ctx.save();
             ctx.translate(W, 0);
@@ -389,46 +460,38 @@
             ctx.fillRect(0, 0, W, H);
         }
 
-        // ── Contour dots (subtle) ──
-        ctx.fillStyle = 'rgba(0, 255, 255, 0.07)';
+        // Body contour glow (subtle)
+        ctx.fillStyle = 'rgba(0, 255, 255, 0.05)';
         for (let i = 0; i < activeContour; i++) {
             const p = contourPool[i].position;
             if (p.x < -1000) continue;
             ctx.beginPath();
-            ctx.arc(p.x, p.y, 3.5, 0, Math.PI * 2);
+            ctx.arc(p.x, p.y, 3, 0, Math.PI * 2);
             ctx.fill();
         }
 
-        // ── Pose skeleton ──
+        // Pose skeleton
         if (latestPose) {
-            ctx.strokeStyle = 'rgba(0, 180, 255, 0.35)';
+            ctx.strokeStyle = 'rgba(0, 180, 255, 0.3)';
             ctx.lineWidth = 3;
             for (const [a, b] of PC) {
                 const la = latestPose[a], lb = latestPose[b];
                 if (!la || !lb || la.visibility < 0.5 || lb.visibility < 0.5) continue;
                 const pa = mp(la.x, la.y), pb = mp(lb.x, lb.y);
-                ctx.beginPath();
-                ctx.moveTo(pa.x, pa.y);
-                ctx.lineTo(pb.x, pb.y);
-                ctx.stroke();
+                ctx.beginPath(); ctx.moveTo(pa.x, pa.y); ctx.lineTo(pb.x, pb.y); ctx.stroke();
             }
         }
 
-        // ── Hand landmarks ──
-        function drawHand(landmarks, handIdx) {
+        // Hands
+        function drawHand(landmarks) {
             if (!landmarks) return;
-            // Skeleton
             ctx.strokeStyle = 'rgba(0, 255, 200, 0.35)';
             ctx.lineWidth = 2;
             for (const [a, b] of HC) {
                 const pa = mp(landmarks[a].x, landmarks[a].y);
                 const pb = mp(landmarks[b].x, landmarks[b].y);
-                ctx.beginPath();
-                ctx.moveTo(pa.x, pa.y);
-                ctx.lineTo(pb.x, pb.y);
-                ctx.stroke();
+                ctx.beginPath(); ctx.moveTo(pa.x, pa.y); ctx.lineTo(pb.x, pb.y); ctx.stroke();
             }
-            // Fingertips
             for (const tipIdx of [4, 8, 12, 16, 20]) {
                 const p = mp(landmarks[tipIdx].x, landmarks[tipIdx].y);
                 ctx.beginPath();
@@ -436,93 +499,66 @@
                 ctx.fillStyle = tipIdx <= 8 ? '#ff0' : 'rgba(255,255,255,0.4)';
                 ctx.fill();
             }
-            // Pinch line
             const t = mp(landmarks[4].x, landmarks[4].y);
             const ix = mp(landmarks[8].x, landmarks[8].y);
             const pd = Math.hypot(t.x - ix.x, t.y - ix.y);
-            ctx.beginPath();
-            ctx.moveTo(t.x, t.y);
-            ctx.lineTo(ix.x, ix.y);
-            ctx.strokeStyle = pd < 40 ? '#0f0' : 'rgba(255, 255, 0, 0.4)';
+            ctx.beginPath(); ctx.moveTo(t.x, t.y); ctx.lineTo(ix.x, ix.y);
+            ctx.strokeStyle = pd < 40 ? '#0f0' : 'rgba(255,255,0,0.4)';
             ctx.lineWidth = pd < 40 ? 3 : 1.5;
             ctx.stroke();
-            // Pinch circle
             if (pd < 40) {
                 const cx = (t.x + ix.x) / 2, cy = (t.y + ix.y) / 2;
-                ctx.beginPath();
-                ctx.arc(cx, cy, 18, 0, Math.PI * 2);
-                ctx.strokeStyle = 'rgba(0, 255, 0, 0.5)';
-                ctx.lineWidth = 2.5;
-                ctx.stroke();
+                ctx.beginPath(); ctx.arc(cx, cy, 18, 0, Math.PI * 2);
+                ctx.strokeStyle = 'rgba(0,255,0,0.5)';
+                ctx.lineWidth = 2.5; ctx.stroke();
             }
         }
-        drawHand(latestLeftHand, 0);
-        drawHand(latestRightHand, 1);
+        drawHand(latestLeftHand);
+        drawHand(latestRightHand);
 
-        // ── Balls ──
+        // Balls
         for (const ball of balls) {
             const bx = ball.position.x, by = ball.position.y, r = ball._r;
 
-            // Shadow
-            ctx.beginPath();
-            ctx.arc(bx + 2, by + 3, r, 0, Math.PI * 2);
-            ctx.fillStyle = 'rgba(0, 0, 0, 0.22)';
-            ctx.fill();
+            ctx.beginPath(); ctx.arc(bx + 2, by + 3, r, 0, Math.PI * 2);
+            ctx.fillStyle = 'rgba(0,0,0,0.22)'; ctx.fill();
 
-            // Body with gradient
             const grad = ctx.createRadialGradient(bx - r * 0.3, by - r * 0.3, r * 0.08, bx, by, r);
             grad.addColorStop(0, 'rgba(255,255,255,0.4)');
             grad.addColorStop(0.4, ball._c);
             grad.addColorStop(1, ball._c);
-            ctx.beginPath();
-            ctx.arc(bx, by, r, 0, Math.PI * 2);
-            ctx.fillStyle = grad;
-            ctx.fill();
+            ctx.beginPath(); ctx.arc(bx, by, r, 0, Math.PI * 2);
+            ctx.fillStyle = grad; ctx.fill();
 
-            // Specular
-            ctx.beginPath();
-            ctx.arc(bx - r * 0.22, by - r * 0.22, r * 0.18, 0, Math.PI * 2);
-            ctx.fillStyle = 'rgba(255, 255, 255, 0.55)';
-            ctx.fill();
+            ctx.beginPath(); ctx.arc(bx - r * 0.22, by - r * 0.22, r * 0.18, 0, Math.PI * 2);
+            ctx.fillStyle = 'rgba(255,255,255,0.55)'; ctx.fill();
 
-            // Grabbed glow
             if (grabbed[0] === ball || grabbed[1] === ball) {
-                ctx.save();
-                ctx.shadowColor = '#0ff';
-                ctx.shadowBlur = 22;
-                ctx.beginPath();
-                ctx.arc(bx, by, r + 7, 0, Math.PI * 2);
-                ctx.strokeStyle = 'rgba(0, 255, 255, 0.85)';
-                ctx.lineWidth = 3;
-                ctx.stroke();
+                ctx.save(); ctx.shadowColor = '#0ff'; ctx.shadowBlur = 22;
+                ctx.beginPath(); ctx.arc(bx, by, r + 7, 0, Math.PI * 2);
+                ctx.strokeStyle = 'rgba(0,255,255,0.85)'; ctx.lineWidth = 3; ctx.stroke();
                 ctx.restore();
             }
         }
 
-        // ── Cleanup ──
+        // Cleanup
         for (let i = balls.length - 1; i >= 0; i--) {
             const p = balls[i].position;
             if (p.y > H + 300 || p.x < -300 || p.x > W + 300) {
                 if (grabbed[0] === balls[i]) grabbed[0] = null;
                 if (grabbed[1] === balls[i]) grabbed[1] = null;
-                World.remove(world, balls[i]);
-                balls.splice(i, 1);
+                World.remove(world, balls[i]); balls.splice(i, 1);
             }
         }
 
-        // ── FPS ──
         frameCount++;
         const now = performance.now();
-        if (now - lastFpsTime > 1000) {
-            fps = frameCount;
-            frameCount = 0;
-            lastFpsTime = now;
-        }
+        if (now - lastFpsTime > 1000) { fps = frameCount; frameCount = 0; lastFpsTime = now; }
         debugEl.textContent = `FPS ${fps} | Balls ${balls.length} | Contour ${activeContour}`;
     }
 
     // ================================================================
-    // MediaPipe Holistic (single model: pose + hands + segmentation)
+    // MediaPipe Holistic
     // ================================================================
     const holistic = new Holistic({
         locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/holistic/${file}`
@@ -538,15 +574,9 @@
     });
     holistic.onResults(onHolisticResults);
 
-    // ================================================================
-    // Camera
-    // ================================================================
     const camera = new Camera(video, {
-        onFrame: async () => {
-            await holistic.send({ image: video });
-        },
-        width: CAM_W,
-        height: CAM_H
+        onFrame: async () => { await holistic.send({ image: video }); },
+        width: CAM_W, height: CAM_H
     });
 
     camera.start().then(() => {
